@@ -1,0 +1,19 @@
+Sprint 1:
+환경 세팅
+DB 설계
+크롤링 기초
+
+Sprint 2:
+캘린더 UI
+일정 CRUD
+FastAPI 연동
+
+Sprint 3:
+시간표 기능
+충돌 감지
+추천 알고리즘
+
+Sprint 4:
+통합 테스트
+배포
+버그 수정
