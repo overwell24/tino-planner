@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 const BASE_URL = "https://eclass.tukorea.ac.kr";
 const TODAY = new Date(2026, 4, 28);
 const DAY_KO = ["월", "화", "수", "목", "금"];
-const HOURS = [9,10,11,12,13,14,15,16,17,18,19];
+const HOURS = [9,10,11,12,13,14,15,16,17,18,19,20,21,22];
 const CELL_H = 52;
 
 const SLOT_HOUR = {1:9,2:10,3:11,4:12,5:13,6:14,7:15,8:16,9:17,10:18,11:19};
@@ -192,10 +192,11 @@ export default function TinoPlan() {
     }, 0);
   }
 
-  function openAdd(date) {
+  function openAdd(date, hour) {
     const d = date || TODAY;
     const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-    setForm({title:"",subject:"",date:ds,time:"23:59",type:"personal"});
+    const ts = hour !== undefined ? `${String(hour).padStart(2,"0")}:00` : "23:59";
+    setForm({title:"",subject:"",date:ds,time:ts,type:"personal"});
     setEditEvent(null);
     setShowModal(true);
   }
@@ -480,10 +481,12 @@ function WeekView({ weekDates, allEvents, blocks, onEdit, onAdd }) {
           <tr key={hour} style={{borderBottom:"0.5px solid #E2E8F0"}}>
             <td style={{padding:"0 5px",textAlign:"right",fontSize:10,color:"#94A3B8",verticalAlign:"top",paddingTop:3,height:CELL_H}}>{hour}:00</td>
             {weekDates.map((d,di) => {
-              const dayEvs = allEvents.filter(e => sameDay(e.due,d) && e.due.getHours()===hour);
+              const dayEvs = allEvents
+  .filter(e => sameDay(e.due,d) && (e.due.getHours()===hour || (hour===9 && e.due.getHours()<9) || (hour===22 && e.due.getHours()>22)))
+  .sort((a,b) => a.due - b.due);
               const dayBlocks = blocks.filter(b => b.day===di && SLOT_HOUR[b.startSlot]===hour);
               return (
-                <td key={di} onClick={() => onAdd(d)} style={{borderRight:"0.5px solid #E2E8F0",height:CELL_H,verticalAlign:"top",padding:2,position:"relative"}}>
+                <td key={di} onClick={() => onAdd(d, hour)} style={{borderRight:"0.5px solid #E2E8F0",height:CELL_H,verticalAlign:"top",padding:2,position:"relative"}}>
                   {dayBlocks.map(b => (
                     <div key={b.code+b.startSlot} className="class-block" style={{background:b.col.bg,borderLeftColor:b.col.border,color:b.col.text,height:(b.endSlot-b.startSlot+1)*CELL_H-6,top:3}}>
                       <div>{b.title}</div>
