@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
+import { createEvent as apiCreateEvent, updateEvent as apiUpdateEvent, deleteEvent as apiDeleteEvent, getEvents as apiGetEvents, logout as apiLogout, transformPersonalEvent } from "./api";
 
-const BASE_URL = "https://eclass.tukorea.ac.kr";
 const TODAY = new Date(2026, 4, 28);
 const DAY_KO = ["월", "화", "수", "목", "금"];
 const HOURS = [9,10,11,12,13,14,15,16,17,18,19,20,21,22];
@@ -114,10 +114,10 @@ const COURSES_DB = [
     ]},
 ];
 
-function buildColorMap(dark) {
+function buildColorMap(dark, courses = COURSES_DB) {
   const palette = dark ? SUBJ_COLORS_DARK : SUBJ_COLORS_LIGHT;
   const map = {};
-  COURSES_DB.forEach((c, i) => { map[c.code] = palette[i % palette.length]; });
+  courses.forEach((c, i) => { map[c.code] = palette[i % palette.length]; });
   return map;
 }
 const DAY_IDX = {월:0,화:1,수:2,목:3,금:4};
@@ -196,19 +196,21 @@ const FONT_SIZES = {
   large:  { base:15, sm:13, xs:11, cellH:78 },
 };
 
-export default function TinoPlan() {
+export default function TinoPlan({
+  userId,
+  coursesDB,
+  enrolled,
+  events,
+  setEnrolled,
+  setEvents,
+  onLogout,
+  onLoginClick,
+}) {
+  // 상위에서 받은 강의 데이터 또는 fallback (개발용 mock)
+  const activeCoursesDB = coursesDB && coursesDB.length ? coursesDB : COURSES_DB;
+
   const [view, setView] = useState("week");
   const [currentDate, setCurrentDate] = useState(TODAY);
-  const [events, setEvents] = useState([
-    {id:101,title:"[과제] 알고리즘 프로그래밍",subject:"알고리즘",due:new Date(2026,4,29,23,59),type:"assignment"},
-    {id:102,title:"[프로젝트] 개발계획서",subject:"소프트웨어공학",due:new Date(2026,5,5,23,59),type:"assignment"},
-    {id:103,title:"[시험] 기말고사",subject:"운영체제",due:new Date(2026,5,10,17,25),type:"exam"},
-    {id:104,title:"[시험] 기말고사",subject:"알고리즘",due:new Date(2026,5,12,13,30),type:"exam"},
-    {id:105,title:"팀 프로젝트 회의",subject:"",due:new Date(2026,4,29,15,0),type:"personal"},
-  ]);
-  const [enrolled, setEnrolled] = useState({
-    "AAK10070":"02","ACS33010":"11","ACS30010":"02","ACS20021":"11","ACS24013":"02","ACS10022":"01","ACS22021":"01"
-  });
   const [visible, setVisible] = useState({class:true,assignment:true,exam:true,personal:true});
   const [showModal, setShowModal] = useState(false);
   const [editEvent, setEditEvent] = useState(null);
@@ -237,8 +239,24 @@ export default function TinoPlan() {
     }
   }, [mobTab, isMobile]);
 
+  // 마운트 시 백엔드의 기존 개인 일정 로드 (이전 세션에 저장된 게 있을 수도)
+  useEffect(() => {
+    if (!userId) return;
+    apiGetEvents(userId)
+      .then(rows => {
+        if (!rows || !rows.length) return;
+        const personalEvents = rows.map(transformPersonalEvent);
+        setEvents(prev => {
+          const existingIds = new Set(prev.map(e => e.id));
+          const fresh = personalEvents.filter(e => !existingIds.has(e.id));
+          return [...prev, ...fresh];
+        });
+      })
+      .catch(err => console.warn("개인 일정 로드 실패:", err.message));
+  }, [userId]);
+
   const fs = FONT_SIZES[fontSize];
-  const colorMap = buildColorMap(darkMode);
+  const colorMap = buildColorMap(darkMode, activeCoursesDB);
   const weekDates = getWeekDates(currentDate);
   const monthCells = getMonthCells(currentDate.getFullYear(), currentDate.getMonth());
 
@@ -246,7 +264,7 @@ export default function TinoPlan() {
     if (!visible.class) return [];
     const blocks = [];
     for (const [code, secNo] of Object.entries(enrolled)) {
-      const course = COURSES_DB.find(c => c.code===code);
+      const course = activeCoursesDB.find(c => c.code===code);
       if (!course) continue;
       const sec = course.sections.find(s => s.no===secNo);
       if (!sec) continue;
@@ -262,7 +280,7 @@ export default function TinoPlan() {
 
   function getEnrolledCredits() {
     return Object.keys(enrolled).reduce((acc, code) => {
-      const c = COURSES_DB.find(x => x.code===code);
+      const c = activeCoursesDB.find(x => x.code===code);
       return acc + (c ? c.credits : 0);
     }, 0);
   }
@@ -281,25 +299,63 @@ export default function TinoPlan() {
     setForm({title:ev.title,subject:ev.subject||"",date:ds,time:ts,type:ev.type||"personal"});
     setEditEvent(ev); setShowModal(true);
   }
-  function saveEvent() {
+  async function saveEvent() {
     if (!form.title || !form.date) return;
     const [y,mo,d] = form.date.split("-").map(Number);
     const [h,m] = form.time.split(":").map(Number);
     const due = new Date(y, mo-1, d, h, m);
-    if (editEvent) {
-      setEvents(evs => evs.map(e => e.id===editEvent.id ? {...e,title:form.title,subject:form.subject,due,type:form.type} : e));
-    } else {
-      setEvents(evs => [...evs, {id:nextId++,title:form.title,subject:form.subject,due,type:form.type}]);
+    const isPersonal = form.type === "personal";
+
+    try {
+      if (editEvent) {
+        // 수정
+        if (isPersonal && typeof editEvent.id === "string") {
+          // 백엔드 일정 (id가 uuid 문자열)
+          await apiUpdateEvent(editEvent.id, { title: form.title, subject: form.subject, due, type: form.type });
+        }
+        setEvents(evs => evs.map(e => e.id===editEvent.id ? {...e,title:form.title,subject:form.subject,due,type:form.type} : e));
+      } else {
+        // 신규 추가
+        if (isPersonal && userId) {
+          const created = await apiCreateEvent(userId, { title: form.title, subject: form.subject, due, type: form.type });
+          setEvents(evs => [...evs, transformPersonalEvent(created)]);
+        } else {
+          // 백엔드 호출 안 함 (과제/시험 같은 임시 추가)
+          setEvents(evs => [...evs, {id:nextId++,title:form.title,subject:form.subject,due,type:form.type}]);
+        }
+      }
+      setShowModal(false);
+    } catch (err) {
+      alert("저장 실패: " + err.message);
     }
-    setShowModal(false);
   }
-  function deleteEvent(id) { setEvents(evs => evs.filter(e => e.id!==id)); setShowModal(false); }
+
+  async function deleteEvent(id) {
+    try {
+      if (typeof id === "string") {
+        // 백엔드 일정
+        await apiDeleteEvent(id);
+      }
+      setEvents(evs => evs.filter(e => e.id!==id));
+      setShowModal(false);
+    } catch (err) {
+      alert("삭제 실패: " + err.message);
+    }
+  }
+
+  async function handleLogout() {
+    if (!window.confirm("로그아웃 하시겠습니까? 입력한 일정은 그대로 유지됩니다.")) return;
+    try {
+      if (userId) await apiLogout(userId);
+    } catch {}
+    onLogout && onLogout();
+  }
   function prevPeriod() { const d=new Date(currentDate); if(view==="week") d.setDate(d.getDate()-7); else d.setMonth(d.getMonth()-1); setCurrentDate(d); }
   function nextPeriod() { const d=new Date(currentDate); if(view==="week") d.setDate(d.getDate()+7); else d.setMonth(d.getMonth()+1); setCurrentDate(d); }
 
   const allEvents = events.filter(e => visible[e.type]);
   const upcoming = allEvents.filter(e => e.due >= TODAY).sort((a,b) => a.due-b.due).slice(0,6);
-  const enrolledCourses = Object.keys(enrolled).map(code => COURSES_DB.find(c => c.code===code)).filter(Boolean);
+  const enrolledCourses = Object.keys(enrolled).map(code => activeCoursesDB.find(c => c.code===code)).filter(Boolean);
   const blocks = getEnrolledBlocks();
 
   // ── 모바일 탭 콘텐츠 ─────────────────────────────────────────────
@@ -441,6 +497,10 @@ export default function TinoPlan() {
           )}
           <button className="icon-btn" onClick={() => openAdd(null)} style={{fontWeight:600,color:"#6366F1",borderColor:"#C7D2FE"}}>+ 일정</button>
           <button className="icon-btn" onClick={() => setShowSettings(true)} style={{padding:"5px 8px"}}>⚙️</button>
+          {userId
+            ? <button className="icon-btn" onClick={handleLogout} style={{padding:"5px 8px"}} title="로그아웃">⎋</button>
+            : <button className="icon-btn" onClick={() => onLoginClick && onLoginClick()} style={{padding:"5px 10px",color:"#6366F1",borderColor:"#C7D2FE",fontWeight:600}} title="로그인">로그인</button>
+          }
         </div>
       </header>
 
@@ -612,42 +672,48 @@ export default function TinoPlan() {
             <div style={{fontSize:fs.sm,color:"var(--text2)",marginBottom:12,background:"var(--bg2)",padding:"8px 10px",borderRadius:8}}>
               분반을 선택하면 시간표에 바로 반영됩니다.
             </div>
-            {[1,2,3,4].map(grade => {
-              const cs = COURSES_DB.filter(c => c.grade===grade);
-              if (!cs.length) return null;
-              return (
-                <div key={grade} style={{marginBottom:14}}>
-                  <div style={{fontSize:fs.sm,fontWeight:600,color:"var(--text3)",marginBottom:6}}>{grade}학년</div>
-                  {cs.map(course => {
-                    const col = colorMap[course.code];
-                    const cur = enrolled[course.code];
-                    return (
-                      <div key={course.code} style={{marginBottom:8}}>
-                        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-                          <span style={{width:8,height:8,borderRadius:"50%",background:col?.border,flexShrink:0}}></span>
-                          <span style={{fontSize:fs.base,fontWeight:500,color:"var(--text)"}}>{course.title}</span>
-                          <span style={{fontSize:fs.xs,color:"var(--text3)"}}>{course.type} · {course.credits}학점</span>
-                          {cur && <span style={{fontSize:fs.xs,color:darkMode?"#86EFAC":"#065F46",background:darkMode?"#1F3A2E":"#ECFDF5",padding:"1px 6px",borderRadius:3}}>✓ {cur}분반</span>}
+            {(() => {
+              // 학년 정보가 있으면 학년별 그룹, 없으면 전체 한 그룹
+              const hasGrade = activeCoursesDB.some(c => c.grade > 0);
+              const groups = hasGrade
+                ? [1,2,3,4].map(g => ({ label: `${g}학년`, items: activeCoursesDB.filter(c => c.grade === g) }))
+                : [{ label: "수강 과목", items: activeCoursesDB }];
+              return groups.map((group, gi) => {
+                if (!group.items.length) return null;
+                return (
+                  <div key={gi} style={{marginBottom:14}}>
+                    <div style={{fontSize:fs.sm,fontWeight:600,color:"var(--text3)",marginBottom:6}}>{group.label}</div>
+                    {group.items.map(course => {
+                      const col = colorMap[course.code];
+                      const cur = enrolled[course.code];
+                      return (
+                        <div key={course.code} style={{marginBottom:8}}>
+                          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+                            <span style={{width:8,height:8,borderRadius:"50%",background:col?.border,flexShrink:0}}></span>
+                            <span style={{fontSize:fs.base,fontWeight:500,color:"var(--text)"}}>{course.title}</span>
+                            <span style={{fontSize:fs.xs,color:"var(--text3)"}}>{course.type} · {course.credits}학점</span>
+                            {cur && <span style={{fontSize:fs.xs,color:darkMode?"#86EFAC":"#065F46",background:darkMode?"#1F3A2E":"#ECFDF5",padding:"1px 6px",borderRadius:3}}>✓ {cur}분반</span>}
+                          </div>
+                          <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                            <button onClick={() => setEnrolled(e => { const n={...e}; delete n[course.code]; return n; })} style={{fontSize:fs.xs,padding:"4px 8px",border:"0.5px solid var(--border)",borderRadius:6,background:"var(--bg2)",color:"var(--text2)",cursor:"pointer"}}>미수강</button>
+                            {course.sections.filter(s => s.sched.length).map(sec => {
+                              const schedStr = sec.sched.map(s => `${s.d}${s.s===s.e?s.s:`${s.s}~${s.e}`}`).join(" ");
+                              const isSel = cur===sec.no;
+                              return (
+                                <button key={sec.no} onClick={() => setEnrolled(e => ({...e,[course.code]:sec.no}))}
+                                  style={{fontSize:fs.xs,padding:"4px 8px",border:isSel?`1.5px solid ${col?.border}`:"0.5px solid var(--border)",borderRadius:6,background:isSel?col?.bg:"var(--card)",color:isSel?col?.text:"var(--text2)",cursor:"pointer"}}>
+                                  {sec.no}분반 {sec.prof||""} ({schedStr})
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
-                        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                          <button onClick={() => setEnrolled(e => { const n={...e}; delete n[course.code]; return n; })} style={{fontSize:fs.xs,padding:"4px 8px",border:"0.5px solid var(--border)",borderRadius:6,background:"var(--bg2)",color:"var(--text2)",cursor:"pointer"}}>미수강</button>
-                          {course.sections.filter(s => s.sched.length).map(sec => {
-                            const schedStr = sec.sched.map(s => `${s.d}${s.s===s.e?s.s:`${s.s}~${s.e}`}`).join(" ");
-                            const isSel = cur===sec.no;
-                            return (
-                              <button key={sec.no} onClick={() => setEnrolled(e => ({...e,[course.code]:sec.no}))}
-                                style={{fontSize:fs.xs,padding:"4px 8px",border:isSel?`1.5px solid ${col?.border}`:"0.5px solid var(--border)",borderRadius:6,background:isSel?col?.bg:"var(--card)",color:isSel?col?.text:"var(--text2)",cursor:"pointer"}}>
-                                {sec.no}분반 {sec.prof} ({schedStr})
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
+                      );
+                    })}
+                  </div>
+                );
+              });
+            })()}
             <button onClick={() => setShowPlanner(false)} style={{width:"100%",padding:"10px 0",border:"none",borderRadius:8,background:"#6366F1",color:"#fff",fontWeight:600,fontSize:fs.base,marginTop:4}}>완료</button>
           </div>
         </div>

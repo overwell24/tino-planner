@@ -9,7 +9,7 @@ Sprint 2: 캘린더 일정 CRUD API
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import eclass, calendar
+from routers import eclass, calendar, courses
 
 app = FastAPI(
     title="Tino Plan API",
@@ -29,6 +29,7 @@ app.add_middleware(
 # 라우터 등록
 app.include_router(eclass.router)
 app.include_router(calendar.router)
+app.include_router(courses.router)
 
 
 @app.get("/")
