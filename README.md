@@ -63,6 +63,8 @@ python scripts/parse_pdf.py data/source/2026_1_시간표.pdf data/courses_2026_1
 ### 학기 변경 시
 1. 새 학기 PDF를 `data/source/` 에 저장
 2. 위 명령으로 새 JSON 생성 (`courses_2026_2.json` 등)
+3. `routers/courses.py` 의 `_DATA_PATH` 를 새 파일로 교체
+4. `TinoPlan.jsx` 의 학기 기간 체크 조건(`getMonth() >= 2 && <= 5`) 수정
 
 ## 모바일에서 사용하기
 
@@ -85,5 +87,3 @@ ifconfig    # Mac/Linux
 브라우저에서 `http://192.168.x.x:3000` 접속.
 
 **처음 실행 시 Windows 방화벽 알림이 뜨면 "허용" 클릭.**
-3. `routers/courses.py` 의 `_DATA_PATH` 를 새 파일로 교체
-4. `TinoPlan.jsx` 의 학기 기간 체크 조건(`getMonth() >= 2 && <= 5`) 수정
