@@ -1,7 +1,9 @@
 // frontend/src/api.js
 // 백엔드 호출 + 응답 데이터를 프론트 state 구조로 변환
 
-const BASE_URL = "http://localhost:8000";
+// 백엔드 BASE URL - 접속한 호스트를 기준으로 동적 결정
+// (localhost로 PC 접속 시 → localhost:8000, 모바일에서 PC IP로 접속 시 → 그 IP:8000)
+const BASE_URL = `http://${window.location.hostname}:8000`;
 
 // ── HTTP 헬퍼 ──────────────────────────────────────────────────────
 async function request(path, options = {}) {
