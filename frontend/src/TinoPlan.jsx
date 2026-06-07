@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { createEvent as apiCreateEvent, updateEvent as apiUpdateEvent, deleteEvent as apiDeleteEvent, getEvents as apiGetEvents, logout as apiLogout, transformPersonalEvent } from "./api";
-
+import RecommendModal from "./RecommendModal";
 const TODAY = new Date();
 TODAY.setHours(0, 0, 0, 0); // 시간 정보 제거 (날짜 비교용)
 const DAY_KO = ["월", "화", "수", "목", "금"];
@@ -184,9 +184,10 @@ function getMonthCells(year, month) {
 }
 
 const MOB_TABS = [
-  { key:"calendar", label:"캘린더", icon:"🗓" },
+  { key:"calendar", label:"캘린더",  icon:"🗓" },
   { key:"upcoming",  label:"마감",   icon:"⏰" },
   { key:"courses",   label:"과목",   icon:"📚" },
+  { key:"recommend", label:"추천",   icon:"✨" },
   { key:"planner",   label:"수업시간표", icon:"📋" },
 ];
 
@@ -301,6 +302,7 @@ export default function TinoPlan({
   const [showModal, setShowModal] = useState(false);
   const [editEvent, setEditEvent] = useState(null);
   const [showPlanner, setShowPlanner] = useState(false);
+  const [showRecommend, setShowRecommend] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [form, setForm] = useState({title:"",subject:"",date:"",time:"23:59",type:"personal"});
 
@@ -689,12 +691,16 @@ export default function TinoPlan({
     return () => window.removeEventListener("resize", handler);
   }, []);
 
-  useEffect(() => {
-    if (isMobile && mobTab === "planner") {
-      setShowPlanner(true);
-      setMobTab("calendar");
-    }
-  }, [mobTab, isMobile]);
+useEffect(() => {
+  if (isMobile && mobTab === "planner") {
+    setShowPlanner(true);
+    setMobTab("calendar");
+  }
+  if (isMobile && mobTab === "recommend") {   
+    setShowRecommend(true);                  
+    setMobTab("calendar");                     
+  }
+}, [mobTab, isMobile]);
 
   // 보조 카드가 다른 과목으로 전환될 때 수동 위치/회피 초기화
   useEffect(() => {
@@ -881,6 +887,48 @@ export default function TinoPlan({
 
   // ── 설정 모달 ─────────────────────────────────────────────────────
   function SettingsModal() {
+      // ── 백업/복원/초기화 ──
+  const handleBackup = () => {
+    const data = { enrolled, events, exportedAt: new Date().toISOString(), version: "tinoplan_v1" };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `tinoplan_backup_${new Date().toLocaleDateString("ko-KR").replace(/\. /g,"-").replace(".","")}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleRestore = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (!data.enrolled && !data.events) throw new Error();
+        if (data.enrolled) setEnrolled(data.enrolled);
+        if (data.events) setEvents(data.events.map(ev => ({
+          ...ev,
+          due: ev.due ? new Date(ev.due) : null,
+        })));
+        await notify("백업 파일을 불러왔습니다.", { title: "불러오기 완료" });
+      } catch {
+        await notify("파일 형식이 올바르지 않습니다.", { title: "오류" });
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const handleReset = async () => {
+    const ok = await askConfirm(
+      "수강 과목과 모든 일정이 삭제됩니다. 되돌릴 수 없습니다.",
+      { title: "전체 초기화", danger: true }
+    );
+    if (ok) { setEnrolled({}); setEvents([]); }
+  };
+
     return (
       <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={() => setShowSettings(false)}>
         <div style={{background:"var(--card)",borderRadius:20,padding:"1.5rem",width:320,maxWidth:"92vw",boxShadow:"0 20px 60px rgba(0,0,0,.2)"}} onClick={e => e.stopPropagation()}>
@@ -915,6 +963,29 @@ export default function TinoPlan({
             </div>
             <div style={{marginTop:10,padding:"10px 12px",background:"var(--bg2)",borderRadius:8,fontSize:fs.base,color:"var(--text2)"}}>
               미리보기: 이렇게 보입니다
+            </div>
+          </div>
+                    {/* 데이터 관리 */}
+          <div style={{marginTop:24}}>
+            <div style={{fontSize:fs.sm,fontWeight:600,color:"var(--text3)",marginBottom:10,textTransform:"uppercase",letterSpacing:".04em"}}>데이터 관리</div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              <button onClick={handleBackup}
+                style={{width:"100%",padding:"10px 0",borderRadius:10,border:"1.5px solid var(--border)",
+                  background:"var(--bg2)",color:"var(--text2)",fontWeight:600,fontSize:fs.sm,cursor:"pointer"}}>
+                💾 백업 (JSON 다운로드)
+              </button>
+              <label style={{width:"100%",padding:"10px 0",borderRadius:10,border:"1.5px solid var(--border)",
+                background:"var(--bg2)",color:"var(--text2)",fontWeight:600,fontSize:fs.sm,cursor:"pointer",
+                textAlign:"center",display:"block"}}>
+                📂 불러오기
+                <input type="file" accept=".json" onChange={handleRestore} style={{display:"none"}}/>
+              </label>
+              <button onClick={handleReset}
+                style={{width:"100%",padding:"10px 0",borderRadius:10,border:"1.5px solid #FCA5A5",
+                  background:darkMode?"#450a0a":"#FEE2E2",color:darkMode?"#FCA5A5":"#DC2626",
+                  fontWeight:600,fontSize:fs.sm,cursor:"pointer"}}>
+                🗑️ 전체 초기화
+              </button>
             </div>
           </div>
         </div>
@@ -1041,6 +1112,7 @@ export default function TinoPlan({
                 </span>
               </div>
               <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <button className="icon-btn" onClick={() => setShowRecommend(true)} style={{color:"#6366F1",borderColor:"#C7D2FE",fontWeight:600}}>✨ 추천</button>
                 <button className="icon-btn" onClick={() => setShowPlanner(true)} style={{color:"#7C3AED",borderColor:"#DDD6FE"}}>📋 수업시간표</button>
                 <button
                   className="icon-btn"
@@ -1328,6 +1400,13 @@ export default function TinoPlan({
       )}
 
       {/* ── 설정 모달 ────────────────────────────────────────────── */}
+      {showRecommend && (<RecommendModal coursesDB={activeCoursesDB} enrolled={enrolled}
+      setEnrolled={setEnrolled}
+      onClose={() => setShowRecommend(false)}
+      darkMode={darkMode}
+      fs={fs}
+      />
+      )}
       {showSettings && <SettingsModal />}
 
       {/* ── 커스텀 confirm/alert 다이얼로그 ──────────────────────── */}
