@@ -57,9 +57,9 @@ class EclassCrawler:
             if not r.get("isError", True):
                 main = self.session.get(f"{BASE_URL}/ilos/main/main_form.acl", timeout=10)
                 self._main_html = main.text
-                print("✅ 로그인 성공")
+                print("[OK] 로그인 성공")
                 return True
-            print(f"❌ 로그인 실패: {r.get('message','')}")
+            print(f"[FAIL] 로그인 실패: {r.get('message','')}")
             return False
         except Exception:
             pass
@@ -68,10 +68,10 @@ class EclassCrawler:
             main = self.session.get(f"{BASE_URL}/ilos/main/main_form.acl", timeout=10)
             if "로그아웃" in main.text:
                 self._main_html = main.text
-                print("✅ 로그인 성공")
+                print("[OK] 로그인 성공")
                 return True
 
-        print("❌ 로그인 실패")
+        print("[FAIL] 로그인 실패")
         return False
 
     # ── 2. 수강 과목 목록 ────────────────────────────────────────
@@ -253,11 +253,11 @@ class EclassCrawler:
         with open("output.json", "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
 
-        print(f"\n✅ 완료!")
+        print(f"\n[OK] 완료!")
         print(f"   수강 과목: {len(courses)}개")
         print(f"   과제:      {len(all_assignments)}개")
         print(f"   공지:      {len(all_notices)}개")
-        print(f"   → output.json 저장됨")
+        print(f"   -> output.json 저장됨")
         return result
 
 
