@@ -1,10 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createEvent as apiCreateEvent, updateEvent as apiUpdateEvent, deleteEvent as apiDeleteEvent, getEvents as apiGetEvents, logout as apiLogout, transformPersonalEvent } from "./api";
 
-const TODAY = new Date(2026, 4, 28);
+const TODAY = new Date();
+TODAY.setHours(0, 0, 0, 0); // 시간 정보 제거 (날짜 비교용)
 const DAY_KO = ["월", "화", "수", "목", "금"];
 const HOURS = [9,10,11,12,13,14,15,16,17,18,19,20,21,22];
-const SLOT_HOUR = {1:9,2:10,3:11,4:12,5:13,6:14,7:15,8:16,9:17,10:18,11:19};
+const SLOT_HOUR = {1:9,2:10,3:11,4:12,5:13,6:14,7:15,8:16,9:17,10:18,11:19,12:20};
 
 const SUBJ_COLORS_LIGHT = [
   { bg:"#EEF2FF", border:"#6366F1", text:"#3730A3" },
@@ -190,11 +191,96 @@ const MOB_TABS = [
 ];
 
 // ── 폰트 크기 단계 ────────────────────────────────────────────────────
+// ── Sprint 3: 학과/학부 매핑 (학수번호 prefix → 표시 라벨) ─────────
+const DEPT_MAP = {
+  AAK: "교양",
+  AAC: "첨단융합대학",
+  AFE: "융합공학",
+  AAJ: "공학혁신(EH/ER)",
+  AIR: "기타",
+  // AI융합대학
+  ACS: "컴퓨터공학부",
+  AIN: "인공지능학과",
+  ASW: "AI·SW전공탐색",
+  // IT반도체융합대학
+  AEE: "전자공학부",
+  AEN: "반도체공학부",
+  ANS: "나노반도체공학",
+  ASC: "IT반도체융합대학",
+  // 스마트기계융합대학
+  AMC: "스마트기계융합대학",
+  AME: "기계공학부",
+  AMD: "기계설계공학부",
+  AMM: "메카트로닉스공학부",
+  AGL: "스마트기계융합",
+  // 첨단융합대학
+  ACH: "생명화학공학과",
+  AMT: "신소재공학과",
+  AEB: "에너지·전기공학부",
+  // 일반학과(부)
+  ADE: "디자인공학부",
+  AAE: "경영학부",
+  // 기타
+  CAI: "지식융합학부",
+  CCD: "지식융합학부",
+};
+
+
 const FONT_SIZES = {
   small:  { base:12, sm:10, xs:9,  cellH:48 },
   medium: { base:13, sm:11, xs:10, cellH:60 },
   large:  { base:15, sm:13, xs:11, cellH:78 },
 };
+
+// ── 충돌 감지: 새 분반을 추가했을 때 기존 enrolled와 시간 겹치는 과목명 반환 ──
+function detectConflict(enrolled, newCode, newSecNo, coursesDB) {
+  const newCourse = coursesDB.find(c => c.code === newCode);
+  if (!newCourse) return [];
+  const newSec = newCourse.sections.find(s => s.no === newSecNo);
+  if (!newSec) return [];
+  const conflicts = [];
+  for (const [code, secNo] of Object.entries(enrolled)) {
+    if (code === newCode) continue;
+    const course = coursesDB.find(c => c.code === code);
+    if (!course) continue;
+    const sec = course.sections.find(s => s.no === secNo);
+    if (!sec) continue;
+    for (const newSeg of newSec.sched) {
+      for (const seg of sec.sched) {
+        if (newSeg.d === seg.d && !(newSeg.e < seg.s || newSeg.s > seg.e)) {
+          conflicts.push(course.title);
+        }
+      }
+    }
+  }
+  return [...new Set(conflicts)];
+}
+
+// ── 충돌 감지: 일정(due 시점)이 수업과 겹치는지 ────────────────────
+function detectEventClassConflict(due, enrolled, coursesDB) {
+  // due 시각이 어느 요일/교시인지 계산
+  const dayIdx = due.getDay(); // 0=일 .. 6=토
+  if (dayIdx < 1 || dayIdx > 5) return null; // 주말은 수업 없음
+  const dayKo = ["월","화","수","목","금"][dayIdx - 1];
+  const hour = due.getHours();
+  // SLOT_HOUR 역매핑
+  const HOUR_SLOT = {9:1,10:2,11:3,12:4,13:5,14:6,15:7,16:8,17:9,18:10,19:11,20:12};
+  const slot = HOUR_SLOT[hour];
+  if (!slot) return null;
+
+  for (const [code, secNo] of Object.entries(enrolled)) {
+    const course = coursesDB.find(c => c.code === code);
+    if (!course) continue;
+    const sec = course.sections.find(s => s.no === secNo);
+    if (!sec) continue;
+    for (const seg of sec.sched) {
+      if (seg.d === dayKo && slot >= seg.s && slot <= seg.e) {
+        return course.title;
+      }
+    }
+  }
+  return null;
+}
 
 export default function TinoPlan({
   userId,
@@ -218,6 +304,377 @@ export default function TinoPlan({
   const [showSettings, setShowSettings] = useState(false);
   const [form, setForm] = useState({title:"",subject:"",date:"",time:"23:59",type:"personal"});
 
+  // 모달 다이얼로그 (confirm/alert 대체)
+  // dialog: { type: 'confirm' | 'alert', title, message, resolve }
+  const [dialog, setDialog] = useState(null);
+
+  function askConfirm(message, { title = "확인", danger = false } = {}) {
+    return new Promise(resolve => {
+      setDialog({ type: "confirm", title, message, danger, resolve });
+    });
+  }
+  function notify(message, { title = "알림" } = {}) {
+    return new Promise(resolve => {
+      setDialog({ type: "alert", title, message, resolve });
+    });
+  }
+  function closeDialog(result) {
+    if (dialog) {
+      dialog.resolve(result);
+      setDialog(null);
+    }
+  }
+
+  // 모달 다이얼로그가 떴을 때 호출자 코드는 async/await으로 분기
+
+  // ── Sprint 3: 드래그 모드 state ───────────────────────────────────
+  const [dragMode, setDragMode] = useState(false);
+  const [selectedBlockCode, setSelectedBlockCode] = useState(null);
+  const [draggingCode, setDraggingCode] = useState(null);
+  const [hoverSlot, setHoverSlot] = useState(null);
+  // 드롭 후보 선택 팝업 { code, candidates: [{no, prof, ...}] }
+  const [dropChoice, setDropChoice] = useState(null);
+  // 모바일 터치 위치 (ghost 네모 표시용) - 카드 위치 계산용 (덜 빈번 갱신)
+  const [touchPos, setTouchPos] = useState(null);
+  // ghost 네모 DOM ref (매 터치마다 transform만 갱신 - 리렌더 없음)
+  const ghostRef = useRef(null);
+  // 자동 스크롤 RAF id
+  const autoScrollRaf = useRef(null);
+  // 현재 마우스/터치 위치 (자동 스크롤 계산용)
+  const dragPointer = useRef({ x: 0, y: 0 });
+  // 드래그 중 여부 (state는 클로저에 캡처되니까 ref로도 같이 보관)
+  const isDraggingRef = useRef(false);
+
+  // ── 보조 카드 위치 관리 ──────────────────────────────────────────
+  const cardRef = useRef(null);
+  // 사용자가 카드를 직접 드래그하여 이동시킨 오프셋 (manual position)
+  const cardManualOffset = useRef({ x: 0, y: 0 });
+  // 자동 회피 오프셋 (마우스가 카드와 겹치려 할 때 밀려나는 거리)
+  const cardAvoidOffset = useRef({ x: 0, y: 0 });
+  // 카드 드래그 중 여부 + 시작 시점 데이터
+  const cardDragging = useRef(null); // { startX, startY, startOffsetX, startOffsetY }
+  // 카드 회피 RAF
+  const cardAvoidRaf = useRef(null);
+
+  // 드래그 중 가장자리 근처에서 컨테이너 자동 스크롤
+  function startAutoScroll() {
+    if (autoScrollRaf.current) return;
+    const step = () => {
+      const { x, y } = dragPointer.current;
+      // 우선 손가락 위치에서 컨테이너 찾기, 못 찾으면 페이지의 첫 calendar-scroll로 fallback
+      let container = null;
+      const el = document.elementFromPoint(x, y);
+      container = el?.closest?.(".calendar-scroll");
+      if (!container) container = document.querySelector(".calendar-scroll");
+      if (container && isDraggingRef.current) {
+        const rect = container.getBoundingClientRect();
+        const EDGE = 60;
+        const SPEED = 12;
+        if (x - rect.left < EDGE) container.scrollLeft -= SPEED;
+        else if (rect.right - x < EDGE) container.scrollLeft += SPEED;
+        if (y - rect.top < EDGE) container.scrollTop -= SPEED;
+        else if (rect.bottom - y < EDGE) container.scrollTop += SPEED;
+      }
+      autoScrollRaf.current = requestAnimationFrame(step);
+    };
+    autoScrollRaf.current = requestAnimationFrame(step);
+  }
+  function stopAutoScroll() {
+    if (autoScrollRaf.current) {
+      cancelAnimationFrame(autoScrollRaf.current);
+      autoScrollRaf.current = null;
+    }
+  }
+
+  // ── 보조 카드 위치 적용 (transform으로 직접 DOM 갱신, 리렌더 없음) ──
+  function applyCardTransform() {
+    if (!cardRef.current) return;
+    const m = cardManualOffset.current;
+    const a = cardAvoidOffset.current;
+    cardRef.current.style.transform = `translate(${m.x + a.x}px, ${m.y + a.y}px)`;
+  }
+
+  // 자동 회피 RAF: 마우스와 카드 경계의 거리 계산하여 카드를 부드럽게 밀어냄
+  function startCardAvoid() {
+    if (cardAvoidRaf.current) return;
+    const target = { x: 0, y: 0 };
+    const PAD = 50; // 카드 경계와 마우스 사이 최소 거리
+    const SMOOTH = 0.2; // 보간 계수 (1에 가까울수록 즉시)
+    const step = () => {
+      if (!cardRef.current || !isDraggingRef.current) {
+        target.x = 0;
+        target.y = 0;
+      } else {
+        const rect = cardRef.current.getBoundingClientRect();
+        const { x: px, y: py } = dragPointer.current;
+        // 현재 적용된 avoid를 제외한 카드 원본 위치
+        const baseLeft = rect.left - cardAvoidOffset.current.x;
+        const baseTop = rect.top - cardAvoidOffset.current.y;
+        const baseRight = baseLeft + rect.width;
+        const baseBottom = baseTop + rect.height;
+        // 마우스가 (확장된) 카드 영역 안에 있으면 가장 가까운 변으로 밀어냄
+        if (
+          px >= baseLeft - PAD && px <= baseRight + PAD &&
+          py >= baseTop - PAD && py <= baseBottom + PAD
+        ) {
+          // 카드를 4방향 중 하나로 밀어내려면 각각 얼마나 이동해야 하나
+          const pushRight = (px + PAD) - baseLeft;   // > 0
+          const pushLeft  = (px - PAD) - baseRight;  // < 0
+          const pushDown  = (py + PAD) - baseTop;    // > 0
+          const pushUp    = (py - PAD) - baseBottom; // < 0
+          const opts = [
+            { dx: pushRight, dy: 0, mag: Math.abs(pushRight) },
+            { dx: pushLeft,  dy: 0, mag: Math.abs(pushLeft) },
+            { dx: 0, dy: pushDown, mag: Math.abs(pushDown) },
+            { dx: 0, dy: pushUp,   mag: Math.abs(pushUp) },
+          ];
+          opts.sort((a,b) => a.mag - b.mag);
+          target.x = opts[0].dx;
+          target.y = opts[0].dy;
+        } else {
+          target.x = 0;
+          target.y = 0;
+        }
+      }
+      // 부드럽게 보간
+      cardAvoidOffset.current.x += (target.x - cardAvoidOffset.current.x) * SMOOTH;
+      cardAvoidOffset.current.y += (target.y - cardAvoidOffset.current.y) * SMOOTH;
+      // 충분히 가까우면 0으로 스냅 (RAF 종료 조건)
+      if (Math.abs(cardAvoidOffset.current.x - target.x) < 0.5 && Math.abs(cardAvoidOffset.current.y - target.y) < 0.5) {
+        cardAvoidOffset.current.x = target.x;
+        cardAvoidOffset.current.y = target.y;
+      }
+      applyCardTransform();
+      // 드래그 중이거나 아직 0으로 안 돌아왔으면 계속
+      if (isDraggingRef.current || Math.abs(cardAvoidOffset.current.x) > 0.5 || Math.abs(cardAvoidOffset.current.y) > 0.5) {
+        cardAvoidRaf.current = requestAnimationFrame(step);
+      } else {
+        cardAvoidRaf.current = null;
+      }
+    };
+    cardAvoidRaf.current = requestAnimationFrame(step);
+  }
+
+  // ── 카드 자체를 드래그하여 이동 ──────────────────────────────────
+  function handleCardPointerDown(e) {
+    const p = e.touches ? e.touches[0] : e;
+    cardDragging.current = {
+      startX: p.clientX,
+      startY: p.clientY,
+      startOffsetX: cardManualOffset.current.x,
+      startOffsetY: cardManualOffset.current.y,
+    };
+    e.preventDefault();
+    window.addEventListener("mousemove", handleCardPointerMove);
+    window.addEventListener("mouseup", handleCardPointerUp);
+    window.addEventListener("touchmove", handleCardPointerMove, { passive: false });
+    window.addEventListener("touchend", handleCardPointerUp);
+  }
+  function handleCardPointerMove(e) {
+    if (!cardDragging.current) return;
+    const p = e.touches ? e.touches[0] : e;
+    if (e.preventDefault && e.cancelable) e.preventDefault();
+    const dx = p.clientX - cardDragging.current.startX;
+    const dy = p.clientY - cardDragging.current.startY;
+    cardManualOffset.current = {
+      x: cardDragging.current.startOffsetX + dx,
+      y: cardDragging.current.startOffsetY + dy,
+    };
+    applyCardTransform();
+  }
+  function handleCardPointerUp() {
+    cardDragging.current = null;
+    window.removeEventListener("mousemove", handleCardPointerMove);
+    window.removeEventListener("mouseup", handleCardPointerUp);
+    window.removeEventListener("touchmove", handleCardPointerMove);
+    window.removeEventListener("touchend", handleCardPointerUp);
+  }
+
+  // 수업 블록 드래그 시작 시 회피 RAF 시작
+  // (handleBlockDragStart, handleBlockTouchStart 안에서 호출 - 아래에서 처리)
+
+  // ── Sprint 3: 수업시간표 모달 필터 ────────────────────────────────
+  const [filterType, setFilterType] = useState("ALL");   // 이수구분
+  const [filterDept, setFilterDept] = useState("ALL");   // 학부
+  const [filterGrade, setFilterGrade] = useState("ALL");
+  const [filterQuery, setFilterQuery] = useState("");
+
+  // ── Sprint 3: 드래그 헬퍼 ─────────────────────────────────────────
+  // 특정 시간대(day, hour)에 시작 또는 진행 중인 분반들 찾기
+  function findMatchingSections(code, dayIdx, hour) {
+    const course = activeCoursesDB.find(c => c.code === code);
+    if (!course) return [];
+    const dayKo = ["월","화","수","목","금"][dayIdx];
+    const HOUR_SLOT = {9:1,10:2,11:3,12:4,13:5,14:6,15:7,16:8,17:9,18:10,19:11,20:12};
+    const targetSlot = HOUR_SLOT[hour];
+    if (!targetSlot) return [];
+    return course.sections.filter(sec => {
+      return sec.sched.some(seg => seg.d === dayKo && targetSlot >= seg.s && targetSlot <= seg.e);
+    });
+  }
+
+  // 드래그 모드에서 수업 블록 클릭 → 분반 리스트 표시
+  function handleBlockClick(code, e) {
+    if (!dragMode) return;
+    if (e) e.stopPropagation();
+    setSelectedBlockCode(prev => prev === code ? null : code);
+  }
+
+  // 드래그 시작
+  function handleBlockDragStart(code, e) {
+    if (!dragMode) return;
+    isDraggingRef.current = true;
+    setDraggingCode(code);
+    setSelectedBlockCode(code);
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", code);
+    }
+    dragPointer.current = { x: e.clientX, y: e.clientY };
+    startAutoScroll();
+    window.addEventListener("dragover", handleGlobalDragOver);
+    startCardAvoid();
+  }
+
+  function handleGlobalDragOver(e) {
+    // window 전체에 dragover를 받으려면 preventDefault가 필요
+    e.preventDefault();
+    dragPointer.current = { x: e.clientX, y: e.clientY };
+  }
+
+  function handleBlockDragEnd() {
+    isDraggingRef.current = false;
+    setDraggingCode(null);
+    setHoverSlot(null);
+    setTouchPos(null);
+    stopAutoScroll();
+    window.removeEventListener("dragover", handleGlobalDragOver);
+  }
+
+  // ── 터치(모바일) 드래그 핸들러 ────────────────────────────────────
+  function handleBlockTouchStart(code, e) {
+    if (!dragMode) return;
+    if (e.touches.length !== 1) return;
+    isDraggingRef.current = true;
+    setDraggingCode(code);
+    setSelectedBlockCode(code);
+    const t = e.touches[0];
+    setTouchPos({ x: t.clientX, y: t.clientY });
+    dragPointer.current = { x: t.clientX, y: t.clientY };
+    startAutoScroll();
+    startCardAvoid();
+  }
+
+  function handleBlockTouchMove(code, e) {
+    if (!dragMode || draggingCode !== code) return;
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    dragPointer.current = { x: touch.clientX, y: touch.clientY };
+    if (ghostRef.current) {
+      ghostRef.current.style.transform = `translate(${touch.clientX - 60}px, ${touch.clientY - 24}px)`;
+    }
+    const el = document.elementFromPoint(touch.clientX, touch.clientY);
+    const td = el?.closest?.("td[data-day]");
+    if (!td) return;
+    const day = Number(td.getAttribute("data-day"));
+    const hour = Number(td.getAttribute("data-hour"));
+    if (Number.isNaN(day) || Number.isNaN(hour)) return;
+    if (!hoverSlot || hoverSlot.day !== day || hoverSlot.hour !== hour) {
+      setHoverSlot({ day, hour });
+      setTouchPos({ x: touch.clientX, y: touch.clientY });
+    }
+  }
+
+  async function handleBlockTouchEnd(code, e) {
+    isDraggingRef.current = false;
+    stopAutoScroll();
+    if (!dragMode || draggingCode !== code) {
+      setTouchPos(null);
+      return;
+    }
+    const touch = e.changedTouches[0];
+    setTouchPos(null);
+    if (!touch) {
+      setDraggingCode(null);
+      setHoverSlot(null);
+      return;
+    }
+    const el = document.elementFromPoint(touch.clientX, touch.clientY);
+    const td = el?.closest?.("td[data-day]");
+    if (!td) {
+      setDraggingCode(null);
+      setHoverSlot(null);
+      return;
+    }
+    const day = Number(td.getAttribute("data-day"));
+    const hour = Number(td.getAttribute("data-hour"));
+    const matched = findMatchingSections(code, day, hour);
+    setDraggingCode(null);
+    setHoverSlot(null);
+    if (!matched.length) {
+      notify("해당 시간대에는 이 과목의 다른 분반이 없습니다.");
+      return;
+    }
+    if (matched.length === 1) {
+      await applySectionChange(code, matched[0].no);
+      return;
+    }
+    setDropChoice({ code, candidates: matched });
+  }
+
+  // 셀 위 드래그 호버
+  function handleCellDragOver(dayIdx, hour, e) {
+    if (!draggingCode) return;
+    e.preventDefault();
+    dragPointer.current = { x: e.clientX, y: e.clientY };
+    if (!hoverSlot || hoverSlot.day !== dayIdx || hoverSlot.hour !== hour) {
+      setHoverSlot({ day: dayIdx, hour });
+      setTouchPos({ x: e.clientX, y: e.clientY });
+    }
+  }
+
+  // 드롭 처리
+  async function handleCellDrop(dayIdx, hour, e) {
+    if (!draggingCode) return;
+    e.preventDefault();
+    const matched = findMatchingSections(draggingCode, dayIdx, hour);
+    const code = draggingCode;
+    isDraggingRef.current = false;
+    setDraggingCode(null);
+    setHoverSlot(null);
+    setTouchPos(null);
+    stopAutoScroll();
+    window.removeEventListener("dragover", handleGlobalDragOver);
+
+    if (!matched.length) {
+      notify("해당 시간대에는 이 과목의 다른 분반이 없습니다.");
+      return;
+    }
+
+    // 후보가 1개면 즉시 교체 시도
+    if (matched.length === 1) {
+      await applySectionChange(code, matched[0].no);
+      return;
+    }
+
+    // 2개 이상이면 선택 팝업
+    setDropChoice({ code, candidates: matched });
+  }
+
+  // 분반 교체 적용 (충돌 검사 포함)
+  async function applySectionChange(code, secNo) {
+    const conflicts = detectConflict(
+      Object.fromEntries(Object.entries(enrolled).filter(([k]) => k !== code)),
+      code, secNo, activeCoursesDB
+    );
+    if (conflicts.length > 0) {
+      const ok = await askConfirm(`이 분반은 다음 과목과 시간이 겹칩니다:\n${conflicts.join(", ")}\n\n그래도 교체하시겠습니까?`, { title: "분반 교체", danger: true });
+      if (!ok) return false;
+    }
+    setEnrolled(prev => ({ ...prev, [code]: secNo }));
+    return true;
+  }
+
   // ── 설정 ──────────────────────────────────────────────────────────
   const [darkMode, setDarkMode] = useState(false);
   const [fontSize, setFontSize] = useState("medium"); // small | medium | large
@@ -238,6 +695,15 @@ export default function TinoPlan({
       setMobTab("calendar");
     }
   }, [mobTab, isMobile]);
+
+  // 보조 카드가 다른 과목으로 전환될 때 수동 위치/회피 초기화
+  useEffect(() => {
+    cardManualOffset.current = { x: 0, y: 0 };
+    cardAvoidOffset.current = { x: 0, y: 0 };
+    if (cardRef.current) {
+      cardRef.current.style.transform = "translate(0, 0)";
+    }
+  }, [selectedBlockCode]);
 
   // 마운트 시 백엔드의 기존 개인 일정 로드 (이전 세션에 저장된 게 있을 수도)
   useEffect(() => {
@@ -306,6 +772,12 @@ export default function TinoPlan({
     const due = new Date(y, mo-1, d, h, m);
     const isPersonal = form.type === "personal";
 
+    // 수업 시간과 충돌 검사 (시험/개인일정 등 시작 시간 기준)
+    const conflictClass = detectEventClassConflict(due, enrolled, activeCoursesDB);
+    if (conflictClass) {
+      const okEv = await askConfirm(`이 시간에 "${conflictClass}" 수업이 있습니다.\n그래도 일정을 추가하시겠습니까?`, { title: "수업 시간과 충돌" }); if (!okEv) return;
+    }
+
     try {
       if (editEvent) {
         // 수정
@@ -326,7 +798,7 @@ export default function TinoPlan({
       }
       setShowModal(false);
     } catch (err) {
-      alert("저장 실패: " + err.message);
+      notify("저장에 실패했습니다: " + err.message);
     }
   }
 
@@ -339,12 +811,12 @@ export default function TinoPlan({
       setEvents(evs => evs.filter(e => e.id!==id));
       setShowModal(false);
     } catch (err) {
-      alert("삭제 실패: " + err.message);
+      notify("삭제에 실패했습니다: " + err.message);
     }
   }
 
   async function handleLogout() {
-    if (!window.confirm("로그아웃 하시겠습니까? 입력한 일정은 그대로 유지됩니다.")) return;
+    const okLogout = await askConfirm("로그아웃 하시겠습니까? 입력한 일정은 그대로 유지됩니다.", { title: "로그아웃" }); if (!okLogout) return;
     try {
       if (userId) await apiLogout(userId);
     } catch {}
@@ -570,6 +1042,19 @@ export default function TinoPlan({
               </div>
               <div style={{display:"flex",gap:6,alignItems:"center"}}>
                 <button className="icon-btn" onClick={() => setShowPlanner(true)} style={{color:"#7C3AED",borderColor:"#DDD6FE"}}>📋 수업시간표</button>
+                <button
+                  className="icon-btn"
+                  onClick={() => { setDragMode(d => !d); setSelectedBlockCode(null); }}
+                  style={{
+                    color: dragMode ? "#fff" : (darkMode?"#FB923C":"#9A3412"),
+                    background: dragMode ? "#F97316" : (darkMode?"#3F3326":"#FFF7ED"),
+                    borderColor: dragMode ? "#F97316" : (darkMode?"#FB923C":"#FED7AA"),
+                    fontWeight: 600,
+                  }}
+                  title={dragMode?"드래그 모드 끄기":"드래그 모드 켜기"}
+                >
+                  ✋ 드래그 {dragMode?"ON":"OFF"}
+                </button>
                 <div style={{display:"flex",background:"var(--bg2)",borderRadius:10,padding:2,gap:1}}>
                   {[["week","주간"],["month","월간"]].map(([k,label]) => (
                     <button key={k} className={`nav-tab${view===k?" active":""}`} onClick={() => setView(k)}>{label}</button>
@@ -577,9 +1062,9 @@ export default function TinoPlan({
                 </div>
               </div>
             </div>
-            <div style={{background:"var(--card)",border:"0.5px solid var(--border)",borderRadius:12,overflow:"auto",flex:1}}>
+            <div style={{background:"var(--card)",border:"0.5px solid var(--border)",borderRadius:12,overflow:"auto",flex:1,maxHeight:"calc(100vh - 130px)"}} className="calendar-scroll">
               {view==="week"
-                ? <WeekView weekDates={weekDates} allEvents={allEvents} blocks={blocks} onEdit={openEdit} onAdd={openAdd} fs={fs} dark={darkMode} />
+                ? <WeekView weekDates={weekDates} allEvents={allEvents} blocks={blocks} onEdit={openEdit} onAdd={openAdd} fs={fs} dark={darkMode} dragMode={dragMode} draggingCode={draggingCode} hoverSlot={hoverSlot} selectedBlockCode={selectedBlockCode} onBlockClick={handleBlockClick} onBlockDragStart={handleBlockDragStart} onBlockDragEnd={handleBlockDragEnd} onBlockTouchStart={handleBlockTouchStart} onBlockTouchMove={handleBlockTouchMove} onBlockTouchEnd={handleBlockTouchEnd} onCellDragOver={handleCellDragOver} onCellDrop={handleCellDrop} activeCoursesDB={activeCoursesDB} enrolled={enrolled} setEnrolled={setEnrolled} colorMap={colorMap} />
                 : <MonthView currentDate={currentDate} monthCells={monthCells} allEvents={allEvents} blocks={blocks} onDayClick={d => { setCurrentDate(d); setView("week"); }} onEdit={openEdit} fs={fs} dark={darkMode} />}
             </div>
           </main>
@@ -602,15 +1087,31 @@ export default function TinoPlan({
                       : `${currentDate.getFullYear()}년 ${currentDate.getMonth()+1}월`}
                   </span>
                 </div>
-                <div style={{display:"flex",background:"var(--bg2)",borderRadius:8,padding:2,gap:1}}>
-                  {[["week","주간"],["month","월간"]].map(([k,label]) => (
-                    <button key={k} className={`nav-tab${view===k?" active":""}`} onClick={() => setView(k)} style={{padding:"3px 10px"}}>{label}</button>
-                  ))}
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <button
+                    className="icon-btn"
+                    onClick={() => { setDragMode(d => !d); setSelectedBlockCode(null); }}
+                    style={{
+                      padding:"3px 8px",
+                      color: dragMode ? "#fff" : (darkMode?"#FB923C":"#9A3412"),
+                      background: dragMode ? "#F97316" : (darkMode?"#3F3326":"#FFF7ED"),
+                      borderColor: dragMode ? "#F97316" : (darkMode?"#FB923C":"#FED7AA"),
+                      fontWeight: 600,
+                    }}
+                    title={dragMode?"드래그 모드 끄기":"드래그 모드 켜기"}
+                  >
+                    ✋ {dragMode?"ON":"OFF"}
+                  </button>
+                  <div style={{display:"flex",background:"var(--bg2)",borderRadius:8,padding:2,gap:1}}>
+                    {[["week","주간"],["month","월간"]].map(([k,label]) => (
+                      <button key={k} className={`nav-tab${view===k?" active":""}`} onClick={() => setView(k)} style={{padding:"3px 10px"}}>{label}</button>
+                    ))}
+                  </div>
                 </div>
               </div>
-              <div style={{background:"var(--card)",border:"0.5px solid var(--border)",borderRadius:12,overflow:"auto",flex:1,margin:"0 10px 10px"}}>
+              <div style={{background:"var(--card)",border:"0.5px solid var(--border)",borderRadius:12,overflow:"auto",flex:1,margin:"0 10px 10px",maxHeight:"calc(100vh - 50px - 50px - 56px - 16px)"}} className="calendar-scroll">
                 {view==="week"
-                  ? <WeekView weekDates={weekDates} allEvents={allEvents} blocks={blocks} onEdit={openEdit} onAdd={openAdd} fs={fs} dark={darkMode} />
+                  ? <WeekView weekDates={weekDates} allEvents={allEvents} blocks={blocks} onEdit={openEdit} onAdd={openAdd} fs={fs} dark={darkMode} dragMode={dragMode} draggingCode={draggingCode} hoverSlot={hoverSlot} selectedBlockCode={selectedBlockCode} onBlockClick={handleBlockClick} onBlockDragStart={handleBlockDragStart} onBlockDragEnd={handleBlockDragEnd} onBlockTouchStart={handleBlockTouchStart} onBlockTouchMove={handleBlockTouchMove} onBlockTouchEnd={handleBlockTouchEnd} onCellDragOver={handleCellDragOver} onCellDrop={handleCellDrop} activeCoursesDB={activeCoursesDB} enrolled={enrolled} setEnrolled={setEnrolled} colorMap={colorMap} />
                   : <MonthView currentDate={currentDate} monthCells={monthCells} allEvents={allEvents} blocks={blocks} onDayClick={d => { setCurrentDate(d); setView("week"); }} onEdit={openEdit} fs={fs} dark={darkMode} />}
               </div>
             </div>
@@ -669,17 +1170,91 @@ export default function TinoPlan({
               <h3 style={{fontSize:fs.base+1,fontWeight:600,color:"var(--text)"}}>수업시간표 — 분반 선택</h3>
               <button onClick={() => setShowPlanner(false)} style={{border:"none",background:"none",fontSize:18,color:"var(--text3)",cursor:"pointer"}}>×</button>
             </div>
-            <div style={{fontSize:fs.sm,color:"var(--text2)",marginBottom:12,background:"var(--bg2)",padding:"8px 10px",borderRadius:8}}>
-              분반을 선택하면 시간표에 바로 반영됩니다.
+            <div style={{fontSize:fs.sm,color:"var(--text2)",marginBottom:10,background:"var(--bg2)",padding:"8px 10px",borderRadius:8}}>
+              전체 <strong>{activeCoursesDB.length}</strong>개 과목. 필터로 좁혀서 분반을 선택하세요.
             </div>
+
+            {/* 필터 영역 */}
+            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:10,alignItems:"center"}}>
+              <input
+                type="text"
+                placeholder="과목명/교수명 검색"
+                value={filterQuery}
+                onChange={e => setFilterQuery(e.target.value)}
+                style={{flex:"1 1 160px",fontSize:fs.sm,padding:"6px 10px"}}
+              />
+              <select value={filterType} onChange={e => setFilterType(e.target.value)} style={{width:"auto",fontSize:fs.sm,padding:"6px 10px"}}>
+                <option value="ALL">전체 이수구분</option>
+                <option value="전필">전공필수</option>
+                <option value="전선">전공선택</option>
+                <option value="교필">교양필수</option>
+                <option value="교선">교양선택</option>
+                <option value="자선">자유선택</option>
+                <option value="현장연구">현장연구</option>
+              </select>
+              <select value={filterDept} onChange={e => setFilterDept(e.target.value)} style={{width:"auto",fontSize:fs.sm,padding:"6px 10px"}}>
+                <option value="ALL">전체 학부</option>
+                {(() => {
+                  // 존재하는 prefix만 모아서 학부 라벨 unique 정렬
+                  const presentPrefixes = [...new Set(activeCoursesDB.map(c => c.code.slice(0,3)))];
+                  const labelToPrefixes = {};
+                  presentPrefixes.forEach(p => {
+                    const label = DEPT_MAP[p] || p;
+                    (labelToPrefixes[label] ||= []).push(p);
+                  });
+                  return Object.keys(labelToPrefixes).sort().map(label => (
+                    <option key={label} value={label}>{label}</option>
+                  ));
+                })()}
+              </select>
+              <select value={filterGrade} onChange={e => setFilterGrade(e.target.value)} style={{width:"auto",fontSize:fs.sm,padding:"6px 10px"}}>
+                <option value="ALL">전체 학년</option>
+                <option value="1">1학년</option>
+                <option value="2">2학년</option>
+                <option value="3">3학년</option>
+                <option value="4">4학년</option>
+              </select>
+              {(filterType !== "ALL" || filterDept !== "ALL" || filterGrade !== "ALL" || filterQuery) && (
+                <button
+                  onClick={() => { setFilterType("ALL"); setFilterDept("ALL"); setFilterGrade("ALL"); setFilterQuery(""); }}
+                  style={{fontSize:fs.xs,padding:"5px 10px",border:"0.5px solid var(--border)",borderRadius:6,background:"var(--bg2)",color:"var(--text2)",cursor:"pointer"}}
+                >초기화</button>
+              )}
+            </div>
+
             {(() => {
-              // 학년 정보가 있으면 학년별 그룹, 없으면 전체 한 그룹
-              const hasGrade = activeCoursesDB.some(c => c.grade > 0);
-              const groups = hasGrade
-                ? [1,2,3,4].map(g => ({ label: `${g}학년`, items: activeCoursesDB.filter(c => c.grade === g) }))
-                : [{ label: "수강 과목", items: activeCoursesDB }];
+              const q = filterQuery.trim().toLowerCase();
+              const enrolledCodes = new Set(Object.keys(enrolled));
+
+              // 필터 적용
+              const filtered = activeCoursesDB.filter(c => {
+                if (filterType !== "ALL" && c.type !== filterType) return false;
+                if (filterDept !== "ALL") {
+                  const prefix = c.code.slice(0, 3);
+                  const label = DEPT_MAP[prefix] || prefix;
+                  if (label !== filterDept) return false;
+                }
+                if (filterGrade !== "ALL" && c.grade !== Number(filterGrade)) return false;
+                if (q) {
+                  const inTitle = c.title.toLowerCase().includes(q);
+                  const inProf = c.sections.some(s => (s.prof||"").toLowerCase().includes(q));
+                  if (!inTitle && !inProf) return false;
+                }
+                return true;
+              });
+
+              // 수강 중인 과목은 항상 상단에 노출 (필터로 가려져도)
+              const enrolledList = activeCoursesDB.filter(c => enrolledCodes.has(c.code));
+              // 필터 결과에서 수강 중인 건 제외 (중복 방지)
+              const otherList = filtered.filter(c => !enrolledCodes.has(c.code));
+
+              const groups = [];
+              if (enrolledList.length) groups.push({ label: "수강 중", items: enrolledList });
+              if (otherList.length) groups.push({ label: `검색 결과 (${otherList.length}개)`, items: otherList });
+              if (!groups.length) {
+                return <div style={{fontSize:fs.sm,color:"var(--text3)",textAlign:"center",padding:"20px 0"}}>조건에 맞는 과목이 없습니다.</div>;
+              }
               return groups.map((group, gi) => {
-                if (!group.items.length) return null;
                 return (
                   <div key={gi} style={{marginBottom:14}}>
                     <div style={{fontSize:fs.sm,fontWeight:600,color:"var(--text3)",marginBottom:6}}>{group.label}</div>
@@ -688,10 +1263,10 @@ export default function TinoPlan({
                       const cur = enrolled[course.code];
                       return (
                         <div key={course.code} style={{marginBottom:8}}>
-                          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+                          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4,flexWrap:"wrap"}}>
                             <span style={{width:8,height:8,borderRadius:"50%",background:col?.border,flexShrink:0}}></span>
                             <span style={{fontSize:fs.base,fontWeight:500,color:"var(--text)"}}>{course.title}</span>
-                            <span style={{fontSize:fs.xs,color:"var(--text3)"}}>{course.type} · {course.credits}학점</span>
+                            <span style={{fontSize:fs.xs,color:"var(--text3)"}}>{course.type} · {course.credits}학점{course.grade>0?` · ${course.grade}학년`:""}</span>
                             {cur && <span style={{fontSize:fs.xs,color:darkMode?"#86EFAC":"#065F46",background:darkMode?"#1F3A2E":"#ECFDF5",padding:"1px 6px",borderRadius:3}}>✓ {cur}분반</span>}
                           </div>
                           <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
@@ -699,9 +1274,42 @@ export default function TinoPlan({
                             {course.sections.filter(s => s.sched.length).map(sec => {
                               const schedStr = sec.sched.map(s => `${s.d}${s.s===s.e?s.s:`${s.s}~${s.e}`}`).join(" ");
                               const isSel = cur===sec.no;
+                              const conflicts = isSel ? [] : detectConflict(enrolled, course.code, sec.no, activeCoursesDB);
+                              const hasConflict = conflicts.length > 0;
                               return (
-                                <button key={sec.no} onClick={() => setEnrolled(e => ({...e,[course.code]:sec.no}))}
-                                  style={{fontSize:fs.xs,padding:"4px 8px",border:isSel?`1.5px solid ${col?.border}`:"0.5px solid var(--border)",borderRadius:6,background:isSel?col?.bg:"var(--card)",color:isSel?col?.text:"var(--text2)",cursor:"pointer"}}>
+                                <button key={sec.no} onClick={async () => {
+                                  if (hasConflict) {
+                                    const ok = await askConfirm(`다음 과목과 시간이 겹칩니다:\n${conflicts.join(", ")}\n\n그래도 추가하시겠습니까?`, { title: "수업 추가", danger: true });
+                                    if (!ok) return;
+                                  }
+                                  setEnrolled(e => ({...e,[course.code]:sec.no}));
+                                }}
+                                  title={hasConflict ? `충돌: ${conflicts.join(", ")}` : ""}
+                                  style={{
+                                    fontSize:fs.xs,
+                                    padding:"4px 8px",
+                                    border: isSel
+                                      ? `1.5px solid ${col?.border}`
+                                      : hasConflict
+                                        ? `1.5px solid ${darkMode?"#FB7185":"#F43F5E"}`
+                                        : "0.5px solid var(--border)",
+                                    borderRadius:6,
+                                    background: isSel
+                                      ? col?.bg
+                                      : hasConflict
+                                        ? (darkMode?"#412A36":"#FFF1F2")
+                                        : "var(--card)",
+                                    color: isSel
+                                      ? col?.text
+                                      : hasConflict
+                                        ? (darkMode?"#FDA4AF":"#BE123C")
+                                        : "var(--text2)",
+                                    cursor:"pointer",
+                                    display:"inline-flex",
+                                    alignItems:"center",
+                                    gap:4,
+                                  }}>
+                                  {hasConflict && <span style={{fontSize:fs.xs}}>⚠</span>}
                                   {sec.no}분반 {sec.prof||""} ({schedStr})
                                 </button>
                               );
@@ -721,24 +1329,307 @@ export default function TinoPlan({
 
       {/* ── 설정 모달 ────────────────────────────────────────────── */}
       {showSettings && <SettingsModal />}
+
+      {/* ── 커스텀 confirm/alert 다이얼로그 ──────────────────────── */}
+      {dialog && (
+        <div
+          onClick={() => closeDialog(false)}
+          style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{background:"var(--card)",borderRadius:14,padding:"20px 22px",width:340,maxWidth:"92vw",boxShadow:"0 20px 60px rgba(0,0,0,.25)"}}
+          >
+            <div style={{fontSize:fs.base+1,fontWeight:600,color:"var(--text)",marginBottom:10}}>
+              {dialog.title}
+            </div>
+            <div style={{fontSize:fs.sm,color:"var(--text2)",marginBottom:18,whiteSpace:"pre-wrap",lineHeight:1.55}}>
+              {dialog.message}
+            </div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+              {dialog.type === "confirm" && (
+                <button
+                  onClick={() => closeDialog(false)}
+                  style={{padding:"8px 14px",border:"0.5px solid var(--border)",borderRadius:8,background:"var(--bg2)",color:"var(--text2)",fontSize:fs.sm,fontWeight:500,cursor:"pointer",fontFamily:"inherit"}}
+                >
+                  취소
+                </button>
+              )}
+              <button
+                onClick={() => closeDialog(true)}
+                style={{
+                  padding:"8px 16px",
+                  border:"none",
+                  borderRadius:8,
+                  background: dialog.danger ? "#EF4444" : "#6366F1",
+                  color:"#fff",
+                  fontSize:fs.sm,
+                  fontWeight:600,
+                  cursor:"pointer",
+                  fontFamily:"inherit",
+                }}
+              >
+                확인
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Sprint 3: 모바일 드래그 ghost (모바일에서만 표시) ── */}
+      {isMobile && draggingCode && touchPos && (() => {
+        const col = colorMap[draggingCode];
+        const course = activeCoursesDB.find(c => c.code === draggingCode);
+        return (
+          <div
+            ref={ghostRef}
+            style={{
+              position: "fixed",
+              left: 0,
+              top: 0,
+              transform: `translate(${touchPos.x - 60}px, ${touchPos.y - 24}px)`,
+              width: 120,
+              pointerEvents: "none",
+              background: col?.bg,
+              border: `2px solid ${col?.border}`,
+              borderLeft: `4px solid ${col?.border}`,
+              color: col?.text,
+              borderRadius: 6,
+              padding: "6px 8px",
+              fontSize: fs.sm,
+              fontWeight: 600,
+              opacity: 0.85,
+              boxShadow: "0 4px 14px rgba(0,0,0,.25)",
+              zIndex: 1200,
+              willChange: "transform",
+            }}
+          >
+            {course?.title || draggingCode}
+          </div>
+        );
+      })()}
+
+      {/* ── Sprint 3: 드롭 후보 선택 팝업 (매칭 분반이 2개 이상일 때) ── */}
+      {dropChoice && (() => {
+        const course = activeCoursesDB.find(c => c.code === dropChoice.code);
+        if (!course) { setDropChoice(null); return null; }
+        const col = colorMap[course.code];
+        return (
+          <div
+            onClick={() => setDropChoice(null)}
+            style={{position:"fixed",inset:0,background:"rgba(0,0,0,.35)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}
+          >
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{background:"var(--card)",borderRadius:14,padding:"18px 20px",width:340,maxWidth:"92vw",boxShadow:"0 20px 60px rgba(0,0,0,.25)"}}
+            >
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <span style={{width:8,height:8,borderRadius:"50%",background:col?.border}}></span>
+                  <h3 style={{fontSize:fs.base+1,fontWeight:600,color:"var(--text)"}}>{course.title}</h3>
+                </div>
+                <button onClick={() => setDropChoice(null)} style={{border:"none",background:"none",fontSize:18,color:"var(--text3)",cursor:"pointer"}}>×</button>
+              </div>
+              <div style={{fontSize:fs.sm,color:"var(--text2)",marginBottom:12}}>
+                이 시간대에 가능한 분반이 {dropChoice.candidates.length}개 있습니다. 선택해주세요.
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {dropChoice.candidates.map(sec => {
+                  const schedStr = sec.sched.map(s => `${s.d}${s.s===s.e?s.s:`${s.s}~${s.e}`}`).join(" ");
+                  const conflicts = detectConflict(
+                    Object.fromEntries(Object.entries(enrolled).filter(([k]) => k !== dropChoice.code)),
+                    dropChoice.code, sec.no, activeCoursesDB
+                  );
+                  const hasConflict = conflicts.length > 0;
+                  return (
+                    <button
+                      key={sec.no}
+                      onClick={async () => {
+                        const ok = await applySectionChange(dropChoice.code, sec.no);
+                        if (ok) setDropChoice(null);
+                      }}
+                      style={{
+                        textAlign:"left",
+                        padding:"10px 12px",
+                        borderRadius:8,
+                        cursor:"pointer",
+                        border: hasConflict
+                          ? `1.5px solid ${darkMode?"#FB7185":"#F43F5E"}`
+                          : `1px solid var(--border)`,
+                        background: hasConflict
+                          ? (darkMode?"#412A36":"#FFF1F2")
+                          : "var(--card)",
+                        color: hasConflict
+                          ? (darkMode?"#FDA4AF":"#BE123C")
+                          : "var(--text)",
+                        fontSize: fs.sm,
+                      }}
+                    >
+                      <div style={{display:"flex",alignItems:"center",gap:5,fontWeight:600}}>
+                        {hasConflict && <span>⚠</span>}
+                        <span>{sec.no}분반 {sec.prof||""}</span>
+                      </div>
+                      <div style={{fontSize:fs.xs,opacity:.75,marginTop:2}}>{schedStr} · {sec.room}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Sprint 3: 드래그 모드 보조 분반 리스트 ───────────────────── */}
+      {dragMode && selectedBlockCode && (() => {
+        const course = activeCoursesDB.find(c => c.code === selectedBlockCode);
+        if (!course) return null;
+        const col = colorMap[course.code];
+        const cur = enrolled[course.code];
+        // 호버 위치의 매칭 분반 (드래그 중일 때)
+        const matched = (draggingCode && hoverSlot)
+          ? findMatchingSections(draggingCode, hoverSlot.day, hoverSlot.hour).map(s => s.no)
+          : [];
+        // 보조 카드 기본 위치 (cursor: grab 헤더로 직접 드래그도 가능, 자동 회피는 RAF가 처리)
+        let cardStyle;
+        if (isMobile) {
+          cardStyle = {
+            position: "fixed",
+            right: 8,
+            bottom: 64,
+            width: "58%",
+            maxWidth: 240,
+            maxHeight: "45vh",
+            willChange: "transform",
+            touchAction: "none",
+          };
+        } else {
+          cardStyle = {
+            position: "fixed",
+            top: 70,
+            left: "calc(100vw - 296px)",
+            width: 280,
+            maxHeight: "70vh",
+            willChange: "transform",
+          };
+        }
+        return (
+          <div
+            ref={cardRef}
+            style={{
+              ...cardStyle,
+              overflowY: "auto",
+              background: "var(--card)",
+              border: `1.5px solid ${col?.border}`,
+              borderRadius: 12,
+              boxShadow: "0 10px 30px rgba(0,0,0,.18)",
+              padding: 14,
+              zIndex: 500,
+            }}
+          >
+            <div
+              onMouseDown={handleCardPointerDown}
+              onTouchStart={handleCardPointerDown}
+              style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,cursor:"grab",userSelect:"none"}}
+            >
+              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                <span style={{width:8,height:8,borderRadius:"50%",background:col?.border}}></span>
+                <span style={{fontSize:fs.base,fontWeight:600,color:"var(--text)"}}>{course.title}</span>
+                <span style={{fontSize:fs.xs,color:"var(--text3)",marginLeft:4}}>⋮⋮</span>
+              </div>
+              <button onMouseDown={e=>e.stopPropagation()} onTouchStart={e=>e.stopPropagation()} onClick={() => { setSelectedBlockCode(null); cardManualOffset.current = {x:0,y:0}; applyCardTransform(); }} style={{border:"none",background:"none",fontSize:18,color:"var(--text3)",cursor:"pointer",padding:0,lineHeight:1}}>×</button>
+            </div>
+            <div style={{fontSize:fs.xs,color:"var(--text3)",marginBottom:10}}>
+              {draggingCode ? "드래그하여 다른 분반으로 교체" : "이 수업의 모든 분반"}
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {course.sections.filter(s => s.sched.length).map(sec => {
+                const schedStr = sec.sched.map(s => `${s.d}${s.s===s.e?s.s:`${s.s}~${s.e}`}`).join(" ");
+                const isCur = cur === sec.no;
+                const isMatch = matched.includes(sec.no);
+                const conflicts = isCur ? [] : detectConflict(
+                  Object.fromEntries(Object.entries(enrolled).filter(([k]) => k !== course.code)),
+                  course.code, sec.no, activeCoursesDB
+                );
+                const hasConflict = conflicts.length > 0;
+                return (
+                  <button
+                    key={sec.no}
+                    onClick={async () => {
+                      if (isCur) return;
+                      if (hasConflict) {
+                        const ok = await askConfirm(`다음 과목과 시간이 겹칩니다:\n${conflicts.join(", ")}\n\n그래도 교체하시겠습니까?`, { title: "분반 교체", danger: true });
+                        if (!ok) return;
+                      }
+                      setEnrolled(e => ({...e, [course.code]: sec.no}));
+                    }}
+                    style={{
+                      textAlign:"left",
+                      fontSize:fs.sm,
+                      padding:"8px 10px",
+                      borderRadius:8,
+                      cursor:"pointer",
+                      // 우선순위: 드래그 호버 매칭 > 현재 선택 > 충돌 > 일반
+                      border: isMatch
+                        ? `2px solid ${col?.border}`
+                        : isCur
+                          ? `1.5px solid ${col?.border}`
+                          : hasConflict
+                            ? `1px solid ${darkMode?"#FB7185":"#F43F5E"}`
+                            : "1px solid var(--border)",
+                      background: isMatch
+                        ? col?.bg
+                        : isCur
+                          ? col?.bg
+                          : hasConflict
+                            ? (darkMode?"#412A36":"#FFF1F2")
+                            : "var(--card)",
+                      color: isMatch || isCur
+                        ? col?.text
+                        : hasConflict
+                          ? (darkMode?"#FDA4AF":"#BE123C")
+                          : "var(--text2)",
+                      fontWeight: (isMatch || isCur) ? 600 : 500,
+                    }}
+                  >
+                    <div style={{display:"flex",alignItems:"center",gap:5}}>
+                      {isMatch && <span>→</span>}
+                      {hasConflict && !isCur && <span>⚠</span>}
+                      <span>{sec.no}분반 {sec.prof||""}</span>
+                      {isCur && <span style={{fontSize:fs.xs,marginLeft:"auto"}}>✓ 현재</span>}
+                    </div>
+                    <div style={{fontSize:fs.xs,opacity:.75,marginTop:2}}>{schedStr} · {sec.room}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
 
-function WeekView({ weekDates, allEvents, blocks, onEdit, onAdd, fs, dark }) {
+function WeekView({
+  weekDates, allEvents, blocks, onEdit, onAdd, fs, dark,
+  dragMode, draggingCode, hoverSlot, selectedBlockCode,
+  onBlockClick, onBlockDragStart, onBlockDragEnd,
+  onBlockTouchStart, onBlockTouchMove, onBlockTouchEnd,
+  onCellDragOver, onCellDrop,
+  activeCoursesDB, enrolled, setEnrolled, colorMap,
+}) {
   return (
-    <table style={{width:"100%",borderCollapse:"collapse",tableLayout:"fixed"}}>
+    <table style={{width:"100%",minWidth:560,borderCollapse:"collapse",tableLayout:"fixed",touchAction: dragMode && draggingCode ? "none" : "auto"}}>
       <colgroup>
-        <col style={{width:36}} />
+        <col style={{width:48}} />
         {weekDates.map((_,i) => <col key={i} />)}
       </colgroup>
       <thead>
-        <tr style={{borderBottom:"0.5px solid var(--border)"}}>
-          <th></th>
+        <tr>
+          <th style={{position:"sticky",top:0,left:0,zIndex:25,background:"var(--card)",borderBottom:"0.5px solid var(--border)",borderRight:"0.5px solid var(--border)"}}></th>
           {weekDates.map((d,i) => {
             const isT = sameDay(d, TODAY);
             return (
-              <th key={i} style={{padding:"7px 2px",textAlign:"center",fontWeight:500}}>
+              <th key={i} style={{padding:"7px 2px",textAlign:"center",fontWeight:500,position:"sticky",top:0,zIndex:20,background:"var(--card)",borderBottom:"0.5px solid var(--border)"}}>
                 <div style={{fontSize:fs.xs,color:"var(--text3)",marginBottom:2}}>{DAY_KO[i]}</div>
                 <div style={{width:26,height:26,borderRadius:"50%",background:isT?"#6366F1":"transparent",color:isT?"#fff":"var(--text)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:fs.sm,fontWeight:isT?700:400,margin:"0 auto"}}>{d.getDate()}</div>
               </th>
@@ -747,26 +1638,123 @@ function WeekView({ weekDates, allEvents, blocks, onEdit, onAdd, fs, dark }) {
         </tr>
       </thead>
       <tbody>
-        {HOURS.map(hour => (
+        {HOURS.map(hour => {
+          // 교시 계산: HOUR_SLOT 역매핑 (1교시=9시 ... 11교시=19시), 그 외는 빈칸
+          const HOUR_TO_SLOT = {9:1,10:2,11:3,12:4,13:5,14:6,15:7,16:8,17:9,18:10,19:11,20:12};
+          const slot = HOUR_TO_SLOT[hour];
+          return (
           <tr key={hour} style={{borderBottom:"0.5px solid var(--border)"}}>
-            <td style={{padding:"0 4px",textAlign:"right",fontSize:fs.xs,color:"var(--text3)",verticalAlign:"top",paddingTop:4,height:fs.cellH}}>{hour}</td>
+            <td style={{padding:"3px 4px",textAlign:"center",fontSize:fs.xs,color:"var(--text3)",verticalAlign:"top",height:fs.cellH,position:"sticky",left:0,zIndex:15,background:"var(--card)",borderRight:"0.5px solid var(--border)",lineHeight:1.3}}>
+              <div style={{fontWeight:600,color:"var(--text2)"}}>{hour}</div>
+              {slot && <div style={{fontSize:Math.max(fs.xs-1,8),opacity:.7}}>{slot}교시</div>}
+            </td>
             {weekDates.map((d,di) => {
               const dayEvs = allEvents
                 .filter(e => sameDay(e.due,d) && (e.due.getHours()===hour || (hour===9&&e.due.getHours()<9) || (hour===22&&e.due.getHours()>22)))
                 .sort((a,b) => a.due-b.due);
-              const dayBlocks = blocks.filter(b => b.day===di && SLOT_HOUR[b.startSlot]===hour);
+              // 1학기 기간(3~6월)만 수업 블록 표시
+              const inSemester = d.getMonth() >= 2 && d.getMonth() <= 5;
+              const dayBlocks = inSemester ? blocks.filter(b => b.day===di && SLOT_HOUR[b.startSlot]===hour) : [];
+              const ongoingBlocks = inSemester ? blocks.filter(b => {
+                if (b.day !== di) return false;
+                const startHour = SLOT_HOUR[b.startSlot];
+                const endHour = SLOT_HOUR[b.endSlot];
+                return hour >= startHour && hour <= endHour;
+              }) : [];
               const hasEvs = dayEvs.length > 0;
+              const hasClassHere = ongoingBlocks.length > 0;
+              const isHoverSlot = hoverSlot && hoverSlot.day === di && hoverSlot.hour === hour;
+              // 드래그 중 + 호버 셀이면 매칭 가능 여부 미리 체크
+              let dropOk = true;
+              if (isHoverSlot && draggingCode) {
+                const course = activeCoursesDB.find(c => c.code === draggingCode);
+                const dayKo = ["월","화","수","목","금"][di];
+                const HOUR_SLOT = {9:1,10:2,11:3,12:4,13:5,14:6,15:7,16:8,17:9,18:10,19:11,20:12};
+                const targetSlot = HOUR_SLOT[hour];
+                dropOk = !!(course && targetSlot && course.sections.some(sec =>
+                  sec.sched.some(seg => seg.d === dayKo && targetSlot >= seg.s && targetSlot <= seg.e)
+                ));
+              }
+              // 드래그 중이면, 이 셀이 매칭 가능한지 미리 보기 (호버 표시용)
               return (
-                <td key={di} onClick={() => onAdd(d,hour)} style={{borderRight:"0.5px solid var(--border)",minHeight:fs.cellH,height:hasEvs?undefined:fs.cellH,verticalAlign:"top",padding:2,position:"relative"}}>
-                  {dayBlocks.map(b => (
-                    <div key={b.code+b.startSlot} className="class-block" style={{background:b.col.bg,borderLeftColor:b.col.border,color:b.col.text,height:(b.endSlot-b.startSlot+1)*fs.cellH-6,top:3}}>
-                      <div>{b.title}</div>
-                      <div style={{fontSize:fs.xs,opacity:.75}}>{b.room}</div>
-                      <div style={{fontSize:fs.xs,opacity:.6}}>{b.prof}</div>
-                    </div>
-                  ))}
+                <td
+                  key={di}
+                  data-day={di}
+                  data-hour={hour}
+                  onClick={() => onAdd(d,hour)}
+                  onDragOver={dragMode && draggingCode ? (e) => onCellDragOver(di, hour, e) : undefined}
+                  onDrop={dragMode && draggingCode ? (e) => onCellDrop(di, hour, e) : undefined}
+                  style={{
+                    borderRight:"0.5px solid var(--border)",
+                    minHeight:fs.cellH,
+                    height:hasEvs?undefined:fs.cellH,
+                    verticalAlign:"top",
+                    padding:2,
+                    position:"relative",
+                    // 드래그 호버 시 하이라이트 (매칭 가능: 보라 / 불가: 빨강)
+                    background: isHoverSlot
+                      ? (dropOk
+                          ? (dark?"rgba(99,102,241,.15)":"rgba(99,102,241,.08)")
+                          : (dark?"rgba(244,63,94,.18)":"rgba(244,63,94,.1)"))
+                      : undefined,
+                    outline: isHoverSlot
+                      ? `2px dashed ${dropOk ? "#6366F1" : "#F43F5E"}`
+                      : undefined,
+                    outlineOffset: -2,
+                  }}
+                >
+                  {dayBlocks.map(b => {
+                    const startHour = SLOT_HOUR[b.startSlot];
+                    const endHour = SLOT_HOUR[b.endSlot];
+                    const blockHasOverlappingEv = allEvents.some(e => {
+                      if (!sameDay(e.due, d)) return false;
+                      const evHour = e.due.getHours();
+                      return evHour >= startHour && evHour <= endHour;
+                    });
+                    const isSelected = dragMode && selectedBlockCode === b.code;
+                    const isDragging = draggingCode === b.code;
+                    return (
+                      <div
+                        key={b.code+b.startSlot}
+                        className="class-block"
+                        draggable={dragMode}
+                        onClick={dragMode ? (e) => onBlockClick(b.code, e) : undefined}
+                        onDragStart={dragMode ? (e) => onBlockDragStart(b.code, e) : undefined}
+                        onDragEnd={dragMode ? onBlockDragEnd : undefined}
+                        onTouchStart={dragMode ? (e) => onBlockTouchStart(b.code, e) : undefined}
+                        onTouchMove={dragMode ? (e) => onBlockTouchMove(b.code, e) : undefined}
+                        onTouchEnd={dragMode ? (e) => onBlockTouchEnd(b.code, e) : undefined}
+                        style={{
+                          background:b.col.bg,
+                          borderLeftColor:b.col.border,
+                          color:b.col.text,
+                          height:(b.endSlot-b.startSlot+1)*fs.cellH-6,
+                          top:3,
+                          left:2,
+                          right: blockHasOverlappingEv ? "50%" : 2,
+                          cursor: dragMode ? "grab" : "default",
+                          // 드래그 모드에서 터치 스크롤 차단
+                          touchAction: dragMode ? "none" : "auto",
+                          opacity: isDragging ? 0.4 : 1,
+                          outline: isSelected ? `2px solid ${b.col.border}` : undefined,
+                          outlineOffset: isSelected ? 1 : 0,
+                          boxShadow: isSelected ? "0 4px 12px rgba(0,0,0,.15)" : undefined,
+                        }}
+                      >
+                        <div>{b.title}</div>
+                        <div style={{fontSize:fs.xs,opacity:.75}}>{b.room}</div>
+                        <div style={{fontSize:fs.xs,opacity:.6}}>{b.prof}</div>
+                      </div>
+                    );
+                  })}
                   {hasEvs && (
-                    <div style={{marginTop: dayBlocks.length ? 4 : 0}}>
+                    <div style={{
+                      // 수업이 이 셀에 (시작이든 진행중이든) 있으면 우측 절반
+                      marginLeft: hasClassHere ? "50%" : 0,
+                      paddingLeft: hasClassHere ? 4 : 0,
+                      position: "relative",
+                      zIndex: 3,
+                    }}>
                       {dayEvs.map(ev => {
                         const ts = typeStyle(ev.type, dark);
                         const typeLabel = {assignment:"과제",exam:"시험",personal:"개인일정"}[ev.type]||ev.type;
@@ -786,7 +1774,8 @@ function WeekView({ weekDates, allEvents, blocks, onEdit, onAdd, fs, dark }) {
               );
             })}
           </tr>
-        ))}
+          );
+        })}
       </tbody>
     </table>
   );
@@ -810,7 +1799,9 @@ function MonthView({ currentDate, monthCells, allEvents, blocks, onDayClick, onE
             const isT = date && sameDay(date, TODAY);
             const isCur = date && date.getMonth()===mo;
             const evs = date ? allEvents.filter(e => sameDay(e.due,date)) : [];
-            const dayBlocks = date&&ci<5 ? [...new Map(blocks.filter(b=>b.day===ci).map(b=>[b.code,b])).values()] : [];
+            // 1학기 기간(3~6월)에만 수업 표시. 2학기는 9~12월 추가하려면 조건 확장
+            const inSemester = date && (date.getMonth() >= 2 && date.getMonth() <= 5);
+            const dayBlocks = (date && ci<5 && inSemester) ? [...new Map(blocks.filter(b=>b.day===ci).map(b=>[b.code,b])).values()] : [];
             const extraCount = Math.max(0,dayBlocks.length-1) + Math.max(0,evs.length-2);
             return (
               <div key={ci} className="month-day" onClick={() => date&&onDayClick(date)} style={{borderRight:ci<6?"0.5px solid var(--border)":"none",opacity:!date||!isCur?0.3:1}}>

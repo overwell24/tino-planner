@@ -46,20 +46,8 @@ export default function App() {
   useEffect(() => {
     getAllCourses()
       .then(list => {
-        // 기존에 크롤링으로 채워진 항목(prof 있음)은 보존, 나머지는 새 데이터로 교체
-        setCoursesDB(prev => {
-          const prevMap = {};
-          prev.forEach(c => {
-            // 크롤링으로 채워진 과목만 보존 (sections[0].prof가 있고 schedule도 있는 경우)
-            const sec = c.sections?.[0];
-            if (sec?.prof && sec?.sched?.length) prevMap[c.code] = c;
-          });
-          // 새 데이터를 베이스로 깔고, 보존 항목은 덮어쓰기
-          const map = {};
-          list.forEach(c => { map[c.code] = c; });
-          Object.entries(prevMap).forEach(([k, v]) => { map[k] = v; });
-          return Object.values(map);
-        });
+        // PDF 전체 데이터로 항상 갱신 (488과목 분반 정보 보존)
+        setCoursesDB(list);
       })
       .catch(err => console.warn("강의 데이터 로드 실패:", err.message))
       .finally(() => setBootLoading(false));
@@ -72,10 +60,14 @@ export default function App() {
 
   function handleLoginSuccess({ userId: uid, coursesDB: newCourses, enrolled: newEnrolled, events: newEvents }) {
     setUserId(uid);
+    // coursesDB는 PDF 전체 데이터 유지 (newCourses는 사용자 수강분반만 1개씩 들어있어서 덮어쓰면 다른 분반이 사라짐)
+    // 다만 PDF에 없는 과목(예: 신규 개설)이 있으면 추가
     setCoursesDB(prev => {
       const map = {};
       prev.forEach(c => { map[c.code] = c; });
-      newCourses.forEach(c => { map[c.code] = c; });
+      newCourses.forEach(c => {
+        if (!map[c.code]) map[c.code] = c;  // PDF에 없는 경우만 추가
+      });
       return Object.values(map);
     });
     setEnrolled(prev => ({ ...prev, ...newEnrolled }));
