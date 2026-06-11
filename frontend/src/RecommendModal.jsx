@@ -663,3 +663,5 @@ export default function RecommendModal({ coursesDB, enrolled, setEnrolled, onClo
     </div>
   );
 }
+
+export { schedsConflict, generateSchedules, fillWithAutoPool, scoreResult };
